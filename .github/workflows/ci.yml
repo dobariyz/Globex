@@ -1,0 +1,35 @@
+name: Backend CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Make Maven wrapper executable
+        run: chmod +x mvnw
+
+      - name: Build package
+        run: ./mvnw -B -DskipTests package
+        env:
+          DATABASE_URL: jdbc:postgresql://localhost:5432/postgres
+          DATABASE_USERNAME: postgres
+          DATABASE_PASSWORD: postgres
+          TWELVEDATA_API_KEY: test-key
+          MARKETDATA_API_DAILY_CALL_LIMIT: 800
