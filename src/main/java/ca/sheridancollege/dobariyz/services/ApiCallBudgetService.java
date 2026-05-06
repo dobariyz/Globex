@@ -28,28 +28,35 @@ public class ApiCallBudgetService {
 
     @Transactional
     public synchronized boolean tryAcquireCall(String reason) {
+        return tryAcquireCredits(1, reason);
+    }
+
+    @Transactional
+    public synchronized boolean tryAcquireCredits(int creditCost, String reason) {
         LocalDate today = LocalDate.now(ZoneId.of(usageTimezone));
         ApiCallUsage usage = apiCallUsageRepository.findByUsageDate(today)
             .orElseGet(() -> newUsage(today));
 
         int currentCount = usage.getCallCount() != null ? usage.getCallCount() : 0;
-        if (currentCount >= dailyCallLimit) {
+        int safeCreditCost = Math.max(1, creditCost);
+        if (currentCount + safeCreditCost > dailyCallLimit) {
             log.warn(
-                "API call budget exhausted for {}: {}/{} calls used. Skipping {}.",
+                "API credit budget exhausted for {}: {}/{} credits used. Skipping {} credits for {}.",
                 today,
                 currentCount,
                 dailyCallLimit,
+                safeCreditCost,
                 reason
             );
             return false;
         }
 
-        usage.setCallCount(currentCount + 1);
+        usage.setCallCount(currentCount + safeCreditCost);
         usage.setUpdatedAt(LocalDateTime.now());
         apiCallUsageRepository.save(usage);
 
         log.info(
-            "API call budget used for {}: {}/{} calls today",
+            "API credit budget used for {}: {}/{} credits today",
             reason,
             usage.getCallCount(),
             dailyCallLimit

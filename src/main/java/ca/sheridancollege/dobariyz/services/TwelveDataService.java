@@ -1,5 +1,6 @@
 package ca.sheridancollege.dobariyz.services;
 
+import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,9 +26,16 @@ public class TwelveDataService {
     @Value("${twelvedata.api.key}")
     private String apiKey;
 
+    @Value("${marketdata.api.batch-credit-cost:50}")
+    private int batchCreditCost;
+
+    @Value("${marketdata.api.rate-limit-cooldown-minutes:720}")
+    private long rateLimitCooldownMinutes;
+
     private final ApiCallBudgetService apiCallBudgetService;
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private LocalDateTime providerRateLimitedUntil;
 
     public Double getCurrentPrice(String symbol) {
         try {
@@ -98,13 +106,19 @@ public class TwelveDataService {
                 return new HashMap<>();
             }
 
-            if (!apiCallBudgetService.tryAcquireCall("batch quote:" + symbols.size() + " symbols")) {
+            if (isProviderRateLimited()) {
+                log.warn("Skipping Twelve Data batch fetch because provider rate limit cooldown is active until {}", providerRateLimitedUntil);
+                return new HashMap<>();
+            }
+
+            int creditCost = Math.max(batchCreditCost, symbols.size());
+            if (!apiCallBudgetService.tryAcquireCredits(creditCost, "batch quote:" + symbols.size() + " symbols")) {
                 return new HashMap<>();
             }
 
             String joinedSymbols = String.join(",", symbols);
             String url = buildUrl("quote", joinedSymbols);
-            log.info("Batch API URL: {}", url.replace(apiKey, "***KEY***"));
+            log.info("Fetching {} symbols from Twelve Data in one batch request", symbols.size());
 
             Map<String, Object> response = restTemplate.getForObject(url, Map.class);
 
@@ -116,8 +130,7 @@ public class TwelveDataService {
             logRawResponse(response);
 
             if (response.containsKey("status") && "error".equals(response.get("status"))) {
-                log.error("API returned error: {}", response.get("message"));
-                log.error("API error code: {}", response.get("code"));
+                handleApiError(response);
                 return null;
             }
 
@@ -156,7 +169,8 @@ public class TwelveDataService {
             return result;
         } catch (HttpClientErrorException e) {
             if (e.getStatusCode().value() == 429) {
-                log.error("Rate limit exceeded during batch fetch. Response: {}", e.getResponseBodyAsString());
+                activateProviderRateLimitCooldown();
+                log.warn("Twelve Data rate limit exceeded during batch fetch. Cooling down until {}", providerRateLimitedUntil);
             } else {
                 log.error("HTTP error during batch fetch: {} - {}", e.getStatusCode(), e.getResponseBodyAsString());
             }
@@ -192,6 +206,27 @@ public class TwelveDataService {
         } catch (Exception e) {
             log.warn("Could not serialize response for debugging: {}", e.getMessage());
         }
+    }
+
+    private void handleApiError(Map<String, Object> response) {
+        Object code = response.get("code");
+        Object message = response.get("message");
+
+        if ("429".equals(String.valueOf(code))) {
+            activateProviderRateLimitCooldown();
+            log.warn("Twelve Data rate limit exceeded. Cooling down until {}. Message: {}", providerRateLimitedUntil, message);
+            return;
+        }
+
+        log.error("Twelve Data API returned error code {}: {}", code, message);
+    }
+
+    private boolean isProviderRateLimited() {
+        return providerRateLimitedUntil != null && LocalDateTime.now().isBefore(providerRateLimitedUntil);
+    }
+
+    private void activateProviderRateLimitCooldown() {
+        providerRateLimitedUntil = LocalDateTime.now().plusMinutes(rateLimitCooldownMinutes);
     }
 
     private Double getDoubleValue(Map<String, Object> map, String key) {
