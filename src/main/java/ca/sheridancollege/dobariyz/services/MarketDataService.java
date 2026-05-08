@@ -3,10 +3,10 @@ package ca.sheridancollege.dobariyz.services;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -49,12 +49,11 @@ public class MarketDataService {
             return;
         }
 
-        Set<Long> indexesWithStoredData = marketDataRepository.findLatestDataPerIndex().stream()
-            .map(MarketData::getIndexId)
-            .collect(Collectors.toSet());
+        Map<Long, MarketData> latestDataByIndex = marketDataRepository.findLatestDataPerIndex().stream()
+            .collect(Collectors.toMap(MarketData::getIndexId, data -> data, (first, second) -> first));
         boolean hasStoredDataForAllTrusted = allIndices.stream()
             .map(MarketIndex::getId)
-            .allMatch(indexesWithStoredData::contains);
+            .allMatch(latestDataByIndex::containsKey);
         boolean anyMarketOpen = allIndices.stream().anyMatch(marketStatusService::isMarketOpen);
 
         if (hasStoredDataForAllTrusted && !anyMarketOpen) {
@@ -62,12 +61,23 @@ public class MarketDataService {
             return;
         }
 
-        List<String> symbols = allIndices.stream()
+        List<MarketIndex> indicesToRefresh = allIndices.stream()
+            .filter(index -> !latestDataByIndex.containsKey(index.getId()) || marketStatusService.isMarketOpen(index))
+            .sorted(Comparator.comparing(index -> latestDataTimestamp(latestDataByIndex.get(index.getId())), Comparator.nullsFirst(Comparator.naturalOrder())))
+            .limit(twelveDataService.getMinuteCreditLimit())
+            .collect(Collectors.toList());
+
+        if (indicesToRefresh.isEmpty()) {
+            log.info("No markets need refresh in this cycle. Keeping stored data.");
+            return;
+        }
+
+        List<String> symbols = indicesToRefresh.stream()
             .map(MarketIndex::getSymbol)
             .distinct()
             .collect(Collectors.toList());
 
-        log.info("Refreshing {} trusted symbols in a single API call: {}", symbols.size(), symbols);
+        log.info("Refreshing {} symbols this cycle within Twelve Data's {} credits/minute limit: {}", symbols.size(), twelveDataService.getMinuteCreditLimit(), symbols);
 
         Map<String, Map<String, Object>> batchQuotes = twelveDataService.fetchBatchQuotes(symbols);
 
@@ -81,12 +91,12 @@ public class MarketDataService {
             return;
         }
 
-        log.info("Received data for {} symbols in this batch out of {} total tracked symbols", batchQuotes.size(), allIndices.size());
+        log.info("Received data for {} symbols in this batch out of {} requested symbols", batchQuotes.size(), symbols.size());
 
         int updated = 0;
         int skipped = 0;
 
-        for (MarketIndex index : allIndices) {
+        for (MarketIndex index : indicesToRefresh) {
             try {
                 Map<String, Object> quote = batchQuotes.get(index.getSymbol());
 
@@ -113,6 +123,10 @@ public class MarketDataService {
             updated,
             skipped
         );
+    }
+
+    private LocalDateTime latestDataTimestamp(MarketData data) {
+        return data != null ? data.getTimestamp() : null;
     }
 
     private boolean saveMarketData(MarketIndex index, Map<String, Object> quote, boolean isOpen) {

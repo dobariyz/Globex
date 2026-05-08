@@ -4,6 +4,7 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -26,10 +27,13 @@ public class TwelveDataService {
     @Value("${twelvedata.api.key}")
     private String apiKey;
 
-    @Value("${marketdata.api.batch-credit-cost:50}")
-    private int batchCreditCost;
+    @Value("${marketdata.api.minute-credit-limit:8}")
+    private int minuteCreditLimit;
 
-    @Value("${marketdata.api.rate-limit-cooldown-minutes:720}")
+    @Value("${marketdata.api.credit-cost-per-symbol:1}")
+    private int creditCostPerSymbol;
+
+    @Value("${marketdata.api.rate-limit-cooldown-minutes:2}")
     private long rateLimitCooldownMinutes;
 
     private final ApiCallBudgetService apiCallBudgetService;
@@ -111,15 +115,29 @@ public class TwelveDataService {
                 return new HashMap<>();
             }
 
-            int creditCost = Math.max(batchCreditCost, symbols.size());
-            if (!apiCallBudgetService.tryAcquireCredits(creditCost, "batch quote:" + symbols.size() + " symbols")) {
-                log.warn("Skipping Twelve Data batch fetch because the local API credit budget is exhausted.");
-                return new HashMap<>();
+            List<String> requestSymbols = symbols.stream()
+                .distinct()
+                .limit(getMinuteCreditLimit())
+                .collect(Collectors.toList());
+
+            if (requestSymbols.size() < symbols.size()) {
+                log.warn(
+                    "Trimming Twelve Data batch from {} to {} symbols to stay within the {} credits/minute plan limit.",
+                    symbols.size(),
+                    requestSymbols.size(),
+                    getMinuteCreditLimit()
+                );
             }
 
-            String joinedSymbols = String.join(",", symbols);
+            int creditCost = Math.max(1, requestSymbols.size() * Math.max(1, creditCostPerSymbol));
+            if (!apiCallBudgetService.tryAcquireCredits(creditCost, "batch quote:" + requestSymbols.size() + " symbols")) {
+                log.warn("Skipping Twelve Data batch fetch because the local API credit budget is exhausted.");
+                return Map.of();
+            }
+
+            String joinedSymbols = String.join(",", requestSymbols);
             String url = buildUrl("quote", joinedSymbols);
-            log.info("Fetching {} symbols from Twelve Data in one batch request", symbols.size());
+            log.info("Fetching {} symbols from Twelve Data in one plan-safe batch request", requestSymbols.size());
 
             Map<String, Object> response = restTemplate.getForObject(url, Map.class);
 
@@ -135,9 +153,9 @@ public class TwelveDataService {
                 return null;
             }
 
-            Map<String, Map<String, Object>> result = new HashMap<>();
+            Map<String, Map<String, Object>> result = new java.util.HashMap<>();
 
-            for (String symbol : symbols) {
+            for (String symbol : requestSymbols) {
                 Object data = response.get(symbol);
 
                 if (data == null) {
@@ -167,9 +185,9 @@ public class TwelveDataService {
             }
 
             if (result.isEmpty()) {
-                log.warn("Twelve Data batch response contained no usable quotes for {} requested symbols", symbols.size());
+                log.warn("Twelve Data batch response contained no usable quotes for {} requested symbols", requestSymbols.size());
             } else {
-                log.info("Successfully parsed {} out of {} symbols", result.size(), symbols.size());
+                log.info("Successfully parsed {} out of {} symbols", result.size(), requestSymbols.size());
             }
             return result;
         } catch (HttpClientErrorException e) {
@@ -232,6 +250,10 @@ public class TwelveDataService {
 
     private void activateProviderRateLimitCooldown() {
         providerRateLimitedUntil = LocalDateTime.now().plusMinutes(rateLimitCooldownMinutes);
+    }
+
+    public int getMinuteCreditLimit() {
+        return Math.max(1, minuteCreditLimit);
     }
 
     private Double getDoubleValue(Map<String, Object> map, String key) {
