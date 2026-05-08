@@ -113,6 +113,7 @@ public class TwelveDataService {
 
             int creditCost = Math.max(batchCreditCost, symbols.size());
             if (!apiCallBudgetService.tryAcquireCredits(creditCost, "batch quote:" + symbols.size() + " symbols")) {
+                log.warn("Skipping Twelve Data batch fetch because the local API credit budget is exhausted.");
                 return new HashMap<>();
             }
 
@@ -140,7 +141,7 @@ public class TwelveDataService {
                 Object data = response.get(symbol);
 
                 if (data == null) {
-                    log.warn("No data for symbol: {}", symbol);
+                    log.debug("No data for symbol: {}", symbol);
                     continue;
                 }
 
@@ -149,23 +150,27 @@ public class TwelveDataService {
                     Map<String, Object> symbolData = (Map<String, Object>) symbolDataRaw;
 
                     if (symbolData.containsKey("status") && "error".equals(symbolData.get("status"))) {
-                        log.warn("Error for {}: {}", symbol, symbolData.get("message"));
+                        log.debug("Error for {}: {}", symbol, symbolData.get("message"));
                         continue;
                     }
 
                     Double close = getDoubleValue(symbolData, "close");
                     if (close != null) {
                         result.put(symbol, mapQuoteResponse(symbolData));
-                        log.info("Parsed {}: ${}", symbol, close);
+                        log.debug("Parsed {}: ${}", symbol, close);
                     } else {
-                        log.warn("No close price for {}", symbol);
+                        log.debug("No close price for {}", symbol);
                     }
                 } else {
-                    log.warn("Invalid data format for {}: {}", symbol, data.getClass().getName());
+                    log.debug("Invalid data format for {}: {}", symbol, data.getClass().getName());
                 }
             }
 
-            log.info("Successfully parsed {} out of {} symbols", result.size(), symbols.size());
+            if (result.isEmpty()) {
+                log.warn("Twelve Data batch response contained no usable quotes for {} requested symbols", symbols.size());
+            } else {
+                log.info("Successfully parsed {} out of {} symbols", result.size(), symbols.size());
+            }
             return result;
         } catch (HttpClientErrorException e) {
             if (e.getStatusCode().value() == 429) {

@@ -76,6 +76,11 @@ public class MarketDataService {
             return;
         }
 
+        if (batchQuotes.isEmpty()) {
+            log.warn("Batch fetch returned no usable quotes. Keeping the latest stored data for this cycle.");
+            return;
+        }
+
         log.info("Received data for {} symbols in this batch out of {} total tracked symbols", batchQuotes.size(), allIndices.size());
 
         int updated = 0;
