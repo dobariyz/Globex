@@ -1,7 +1,11 @@
 package ca.sheridancollege.dobariyz.services;
 
 import java.math.BigDecimal;
+import java.time.DayOfWeek;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -10,6 +14,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import ca.sheridancollege.dobariyz.beans.MarketData;
@@ -37,6 +42,15 @@ public class MarketDataService {
     @Autowired
     private MarketStatusService marketStatusService;
 
+    @Value("${marketdata.api.trading-timezone:America/New_York}")
+    private String apiTradingTimezone;
+
+    @Value("${marketdata.api.trading-open-time:09:30}")
+    private String apiTradingOpenTime;
+
+    @Value("${marketdata.api.trading-close-time:16:00}")
+    private String apiTradingCloseTime;
+
     public void updateMarketData() {
         log.info("Starting market data update with one-call batch fetching");
 
@@ -54,15 +68,20 @@ public class MarketDataService {
         boolean hasStoredDataForAllTrusted = allIndices.stream()
             .map(MarketIndex::getId)
             .allMatch(latestDataByIndex::containsKey);
-        boolean anyMarketOpen = allIndices.stream().anyMatch(marketStatusService::isMarketOpen);
+        boolean apiRefreshWindowOpen = isApiRefreshWindowOpen();
 
-        if (hasStoredDataForAllTrusted && !anyMarketOpen) {
-            log.info("All tracked markets are currently closed. Keeping stored data and saving API budget.");
+        if (hasStoredDataForAllTrusted && !apiRefreshWindowOpen) {
+            log.info(
+                "US ETF data refresh window is closed ({} {}-{}). Keeping stored data and saving API budget.",
+                apiTradingTimezone,
+                apiTradingOpenTime,
+                apiTradingCloseTime
+            );
             return;
         }
 
         List<MarketIndex> indicesToRefresh = allIndices.stream()
-            .filter(index -> !latestDataByIndex.containsKey(index.getId()) || marketStatusService.isMarketOpen(index))
+            .filter(index -> !latestDataByIndex.containsKey(index.getId()) || apiRefreshWindowOpen)
             .sorted(Comparator.comparing(index -> latestDataTimestamp(latestDataByIndex.get(index.getId())), Comparator.nullsFirst(Comparator.naturalOrder())))
             .limit(twelveDataService.getMinuteCreditLimit())
             .collect(Collectors.toList());
@@ -127,6 +146,26 @@ public class MarketDataService {
 
     private LocalDateTime latestDataTimestamp(MarketData data) {
         return data != null ? data.getTimestamp() : null;
+    }
+
+    private boolean isApiRefreshWindowOpen() {
+        try {
+            ZonedDateTime now = ZonedDateTime.now(ZoneId.of(apiTradingTimezone));
+            DayOfWeek dayOfWeek = now.getDayOfWeek();
+
+            if (dayOfWeek == DayOfWeek.SATURDAY || dayOfWeek == DayOfWeek.SUNDAY) {
+                return false;
+            }
+
+            LocalTime currentTime = now.toLocalTime();
+            LocalTime openTime = LocalTime.parse(apiTradingOpenTime);
+            LocalTime closeTime = LocalTime.parse(apiTradingCloseTime);
+
+            return !currentTime.isBefore(openTime) && currentTime.isBefore(closeTime);
+        } catch (Exception e) {
+            log.warn("Could not evaluate API refresh window. Falling back to closed: {}", e.getMessage());
+            return false;
+        }
     }
 
     private boolean saveMarketData(MarketIndex index, Map<String, Object> quote, boolean isOpen) {
